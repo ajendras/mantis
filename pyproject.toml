@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mantis"
+version = "0.1.0"
+description = "Automates GitHub issue triage, PR reviews and maintainer tasks with local LLMs"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+authors = [
+    {name = "Mantis Contributors"},
+]
+keywords = ["github", "ollama", "llm", "triage", "review", "automation"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Version Control",
+]
+
+dependencies = [
+    "typer>=0.12.3",
+    "pydantic>=2.6.0",
+    "pydantic-settings>=2.2.0",
+    "requests>=2.31.0",
+    "ollama>=0.3.0",
+    "rich>=13.7.0",
+]
+
+[project.scripts]
+mantis = "mantis.cli:app"
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0.0",
+    "pytest-mock>=3.12.0",
+    "responses>=0.25.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+namespaces = false
+
+[tool.setuptools.package-data]
+mantis = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+addopts = "-q --tb=short"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
