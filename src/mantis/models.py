@@ -114,9 +114,9 @@ class TriageResult(BaseModel):
             return []
         return [str(item).strip() for item in v if str(item).strip()]
 
-    @field_validator("priority")
+    @field_validator("priority", mode="before")
     @classmethod
-    def normalize_priority(cls, v: str) -> Literal["low", "medium", "high"]:
+    def normalize_priority(cls, v: Any) -> Literal["low", "medium", "high"]:
         if not v:
             return "medium"
         norm = str(v).lower().strip()

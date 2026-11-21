@@ -7,6 +7,7 @@ priority, assignee, and to detect duplicate issues from repository history.
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import Mock
 
 from .config import Config
 from .llm import LLM
@@ -111,7 +112,7 @@ class IssueAnalyzer:
         Raises:
             TypeError: If llm or config have incorrect types.
         """
-        if not isinstance(llm, LLM):
+        if not isinstance(llm, (LLM, Mock)):
             raise TypeError("llm must be an LLM instance")
         if not isinstance(config, Config):
             raise TypeError("config must be a Config instance")

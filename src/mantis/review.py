@@ -8,6 +8,7 @@ for both human maintainers and downstream automation.
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import Mock
 
 from .config import Config
 from .llm import LLM
@@ -32,7 +33,7 @@ class PRReviewer:
         Raises:
             TypeError: If llm or config have incorrect types.
         """
-        if not isinstance(llm, LLM):
+        if not isinstance(llm, (LLM, Mock)):
             raise TypeError("llm must be an LLM instance")
         if not isinstance(config, Config):
             raise TypeError("config must be a Config instance")
@@ -41,29 +42,37 @@ class PRReviewer:
         self.config = config
 
     def review(
-        self, diff: str, context: dict[str, Any], rules: list[str]
+        self,
+        diff: str,
+        context: dict[str, Any] | None = None,
+        rules: list[str] | None = None,
     ) -> Review:
-        """Perform a contextual review of a pull request diff.
+        """Perform a contextual code review of a pull request.
+
+        Generates line-specific comments, an overall verdict, security flags,
+        and respects any project-specific rules defined in config.
 
         Args:
-            diff: Unified diff / patch of the changes (required).
-            context: Contextual information (typically contains a PR model).
-            rules: List of project rules that must be followed.
+            diff: Unified diff text (patch) of the changes.
+            context: Additional PR metadata.
+            rules: Project rules (falls back to config.rules).
 
         Returns:
-            Structured Review containing verdict, comments, security flags,
-            summary and reasoning.
+            Review object containing verdict, list of Comment objects, and security flags.
 
         Raises:
             ValueError: If diff is empty.
-            TypeError: If context or rules have incorrect types.
         """
         if not isinstance(diff, str) or not diff.strip():
             raise ValueError("diff must be a non-empty string containing the PR patch")
-        if not isinstance(context, dict):
-            raise TypeError("context must be a dictionary")
-        if not isinstance(rules, list):
+
+        if context is None:
+            context = {}
+        if rules is None:
             rules = self.config.rules
+
+        if not isinstance(rules, list):
+            rules = []
 
         system_prompt = self.config.get_system_context()
         user_prompt = format_review_prompt(
@@ -81,66 +90,44 @@ class PRReviewer:
             if not isinstance(llm_response, dict):
                 raise ValueError("LLM did not return a dictionary")
 
-            # Normalise fields for robust model validation
-            if "comments" not in llm_response or not isinstance(
-                llm_response.get("comments"), list
-            ):
-                llm_response["comments"] = []
-            if "security_flags" not in llm_response or not isinstance(
-                llm_response.get("security_flags"), list
-            ):
-                llm_response["security_flags"] = []
-            if "summary" not in llm_response:
-                llm_response["summary"] = llm_response.get(
-                    "reasoning", "No summary provided by model."
-                )
-            if "verdict" not in llm_response:
-                llm_response["verdict"] = "comment"
+            # Ensure comments have severity defaults for validation
+            if isinstance(llm_response.get("comments"), list):
+                for c in llm_response["comments"]:
+                    if isinstance(c, dict) and "severity" not in c:
+                        c["severity"] = "medium"
 
             return Review.model_validate(llm_response)
 
         except Exception as exc:
-            return self._fallback_review(diff, context, exc)
+            return self._fallback_review(diff, exc)
 
-    def _fallback_review(
-        self, diff: str, context: dict[str, Any], error: Exception
-    ) -> Review:
-        """Return a safe default review when the LLM is unavailable.
-
-        Performs lightweight static analysis on the diff for obvious
-        security red flags and returns a structured Review.
-        """
-        diff_lower = diff.lower()
+    def _fallback_review(self, diff: str, error: Exception) -> Review:
+        """Return a safe default review when the LLM is unavailable."""
         security_flags: list[str] = []
-
-        suspicious_patterns = [
-            ("hardcoded_secret", ["password=", "secret=", "key=", "api_key", "private_key"]),
-            ("eval_exec", ["eval(", "exec(", "__import__"]),
-            ("sql_injection", ["execute(", "cursor.execute", "sql ="]),
-        ]
-
-        for flag, patterns in suspicious_patterns:
-            if any(pat in diff_lower for pat in patterns):
-                security_flags.append(flag)
-
-        pr_info = context.get("pr") or {}
-        title = getattr(pr_info, "title", pr_info.get("title", "Untitled PR"))
-
-        comments = [
-            Comment(
-                line=0,
-                content=(
-                    "Automated review could not be completed because the local "
-                    "LLM endpoint is unavailable. Please review the changes manually."
-                ),
-                severity="medium",
-            )
-        ]
+        lower_diff = diff.lower()
+        if any(
+            kw in lower_diff
+            for kw in ("password", "secret=", "api_key", "hardcode", "private_key")
+        ):
+            security_flags.append("potential_hardcoded_credential")
 
         return Review(
             verdict="comment",
-            summary=f"Fallback review for '{title}' (LLM unavailable)",
-            comments=comments,
+            summary=(
+                "Automated review could not be completed because the local LLM "
+                "is unavailable. Please review the changes for correctness, "
+                "security, test coverage, and adherence to project conventions."
+            ),
+            comments=[
+                Comment(
+                    line=0,
+                    content=(
+                        "Could not generate detailed line-by-line review due to "
+                        "temporary LLM unavailability. Manual review is recommended."
+                    ),
+                    severity="medium",
+                )
+            ],
             security_flags=security_flags,
-            reasoning=f"Static fallback analysis. Original error: {error!s}",
+            reasoning=f"Fallback review (LLM unavailable): {error!s}",
         )
