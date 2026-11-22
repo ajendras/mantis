@@ -26,11 +26,12 @@ from mantis import (
 )
 from mantis.config import Config
 from mantis.github import GitHubClient
+from mantis.gitlab import GitLabClient
 from mantis.models import Review, TriageResult
 
 app = typer.Typer(
     name="mantis",
-    help="Local-first GitHub maintainer assistant powered by Ollama.",
+    help="Local-first GitHub and GitLab maintainer assistant powered by Ollama.",
     rich_markup_mode="rich",
     pretty_exceptions_enable=False,
     add_completion=True,
@@ -53,6 +54,16 @@ def _print_header(title: str) -> None:
     )
     console.print(header)
     console.print()
+
+
+def _get_client(config: Config) -> GitHubClient | GitLabClient:
+    """Return the appropriate VCS client based on configured platform."""
+    token = config.github_token
+    if config.platform == "gitlab":
+        token = config.gitlab_token or config.github_token
+    if config.platform == "github":
+        return GitHubClient(token=token)
+    return GitLabClient(token=token, base_url=config.gitlab_url)
 
 
 @app.command()
@@ -101,6 +112,9 @@ def triage(
     ),
     issue: int = typer.Option(..., "--issue", "-i", help="Issue or PR number"),
     model: str | None = typer.Option(None, "--model", "-m", help="Override LLM model"),
+    platform: str = typer.Option(
+        "github", "--platform", help="Platform: github or gitlab"
+    ),
 ) -> None:
     """Analyze an issue and suggest labels, priority, assignee and duplicates."""
     _print_header("Issue Triage")
@@ -109,13 +123,19 @@ def triage(
         console.print("[red]Error: --repo must be in owner/repo format[/red]")
         raise typer.Exit(1)
 
+    if platform not in ("github", "gitlab"):
+        console.print("[red]Error: --platform must be github or gitlab[/red]")
+        raise typer.Exit(1)
+
     owner, repo_name = repo.split("/", 1)
 
     config = Config.load()
     if model:
         config.model = model
+    if platform != "github":
+        config.platform = platform
 
-    client = GitHubClient(token=config.github_token)
+    client = _get_client(config)
 
     try:
         issue_data: dict[str, Any] = client.get_issue(owner, repo_name, issue)
@@ -155,13 +175,14 @@ def triage(
     console.print(meta)
 
     if result.duplicate_ids:
-        dups = "  ".join(f"[link=https://github.com/{owner}/{repo_name}/issues/{d}]#{d}[/link]" for d in result.duplicate_ids)
+        web_base = "https://github.com" if config.platform == "github" else "https://gitlab.com"
+        dups = "  ".join(f"[link={web_base}/{owner}/{repo_name}/issues/{d}]#{d}[/link]" for d in result.duplicate_ids)
         console.print(f"\n[yellow]Possible duplicates:[/yellow] {dups}")
 
     console.print("\n[bold #5c4033]Reasoning[/bold #5c4033]")
     console.print(result.reasoning.strip())
 
-    console.print("\n[dim]Copy these labels into GitHub or run with --model to experiment.[/dim]")
+    console.print("\n[dim]Copy these labels into GitHub or GitLab or run with --model to experiment.[/dim]")
 
 
 @app.command()
@@ -169,14 +190,21 @@ def review(
     repo: str = typer.Option(
         ..., "--repo", "-r", help="Repository in owner/repo format"
     ),
-    pr: int = typer.Option(..., "--pr", "-p", help="Pull request number"),
+    pr: int = typer.Option(..., "--pr", "-p", help="Pull request / MR number"),
     model: str | None = typer.Option(None, "--model", "-m", help="Override LLM model"),
+    platform: str = typer.Option(
+        "github", "--platform", help="Platform: github or gitlab"
+    ),
 ) -> None:
-    """Review a pull request and generate line-specific comments."""
-    _print_header("Pull Request Review")
+    """Review a pull request or merge request and generate line-specific comments."""
+    _print_header("Pull Request / MR Review")
 
     if "/" not in repo or len(repo.split("/")) != 2:
         console.print("[red]Error: --repo must be in owner/repo format[/red]")
+        raise typer.Exit(1)
+
+    if platform not in ("github", "gitlab"):
+        console.print("[red]Error: --platform must be github or gitlab[/red]")
         raise typer.Exit(1)
 
     owner, repo_name = repo.split("/", 1)
@@ -184,14 +212,16 @@ def review(
     config = Config.load()
     if model:
         config.model = model
+    if platform != "github":
+        config.platform = platform
 
-    client = GitHubClient(token=config.github_token)
+    client = _get_client(config)
 
     try:
-        pr_data: dict[str, Any] = client.get_issue(owner, repo_name, pr)
-        diff_text = client.get_pr_diff(owner, repo_name, pr)
+        pr_data: dict[str, Any] = client.get_merge_request(owner, repo_name, pr)
+        diff_text = client.get_mr_diff(owner, repo_name, pr)
     except Exception as exc:
-        console.print(f"[red]Could not fetch PR #{pr}: {exc}[/red]")
+        console.print(f"[red]Could not fetch PR/MR #{pr}: {exc}[/red]")
         raise typer.Exit(1) from exc
 
     try:
@@ -206,9 +236,10 @@ def review(
         "comment": "yellow",
     }.get(result.verdict.lower(), "white")
 
+    item_type = "PR" if config.platform == "github" else "MR"
     verdict_panel = Panel(
         f"[{verdict_style} bold]{result.verdict.upper()}[/{verdict_style} bold]",
-        title=f"PR #{pr} • {pr_data.get('title','Untitled')}",
+        title=f"{item_type} #{pr} • {pr_data.get('title','Untitled')}",
         border_style="#5c4033",
         padding=(1, 2),
     )
@@ -235,7 +266,7 @@ def review(
             )
             console.print(f"   {comment.content.strip()}")
 
-    console.print("\n[dim]These comments can be posted directly to the PR on GitHub.[/dim]")
+    console.print("\n[dim]These comments can be posted directly to the PR/MR on GitHub or GitLab.[/dim]")
 
 
 @app.command()
@@ -245,6 +276,9 @@ def digest(
     ),
     days: int = typer.Option(7, "--days", "-d", min=1, max=90, help="Days to summarize"),
     model: str | None = typer.Option(None, "--model", "-m", help="Override LLM model"),
+    platform: str = typer.Option(
+        "github", "--platform", help="Platform: github or gitlab"
+    ),
 ) -> None:
     """Generate a concise markdown digest of recent repository activity."""
     _print_header(f"Digest — {repo} (last {days} days)")
@@ -253,9 +287,15 @@ def digest(
         console.print("[red]Error: --repo must be in owner/repo format[/red]")
         raise typer.Exit(1)
 
+    if platform not in ("github", "gitlab"):
+        console.print("[red]Error: --platform must be github or gitlab[/red]")
+        raise typer.Exit(1)
+
     config = Config.load()
     if model:
         config.model = model
+    if platform != "github":
+        config.platform = platform
 
     try:
         report = generate_digest(repo=repo, days=days, config=config)
@@ -278,6 +318,7 @@ def config(
     show: bool = typer.Option(False, "--show", help="Display full configuration as JSON"),
     model: str = typer.Option("", "--model", help="Update default model name"),
     add_rule: str = typer.Option("", "--add-rule", help="Add a new project rule"),
+    platform: str = typer.Option("", "--platform", help="Set platform (github|gitlab)"),
 ) -> None:
     """View or update Mantis configuration."""
     config = Config.load()
@@ -287,6 +328,11 @@ def config(
         config.model = model
         updated = True
         console.print(f"[green]✓[/green] Default model set to [bold]{model}[/bold]")
+
+    if platform and platform in ("github", "gitlab"):
+        config.platform = platform
+        updated = True
+        console.print(f"[green]✓[/green] Platform set to [bold]{platform}[/bold]")
 
     if add_rule:
         if add_rule.strip() not in config.rules:
@@ -298,7 +344,7 @@ def config(
         config.save()
         console.print("[dim]Configuration persisted to .mantis/config.json[/dim]")
 
-    if show or not (model or add_rule):
+    if show or not (model or add_rule or platform):
         cfg_dict = config.model_dump(
             mode="json",
             exclude={"repo_path"},

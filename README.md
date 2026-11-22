@@ -12,7 +12,7 @@
 <img src="https://img.shields.io/github/last-commit/ajendras/mantis?style=for-the-badge&color=f8f1e3" alt="Last commit">
 <a href="CONTRIBUTING.md"><img src="https://img.shields.io/badge/PRs-welcome-22c55e?style=for-the-badge" alt="PRs welcome"></a>
 
-**Automates GitHub issue triage, PR reviews and maintainer tasks with local LLMs**
+**Automates GitHub and GitLab issue triage, PR/MR reviews and maintainer tasks with local LLMs**
 
 [✨ Features](#-features) • [⚡ Quick start](#-quick-start) • [🧰 Usage](#-usage) • [🧩 Architecture](#-architecture) • [📍 Roadmap](#-roadmap) • [🤝 Contributing](#-contributing)
 
@@ -21,12 +21,13 @@
 
 ## ✨ Why Mantis?
 
-Open-source maintainers drown in issues, PRs and repetitive questions while burning out. Existing AI tools leak private repo data to the cloud and lack project-specific context. Mantis runs 100% locally, learns your conventions from the repo itself, and handles the busywork so humans can focus on architecture and community.
+Open-source maintainers drown in issues, PRs/MRs and repetitive questions while burning out. Existing AI tools leak private repo data to the cloud and lack project-specific context. Mantis runs 100% locally, learns your conventions from the repo itself, and handles the busywork so humans can focus on architecture and community.
 
 - Runs entirely with Ollama or any local OpenAI-compatible endpoint — nothing leaves your machine
-- Learns tone, labels and priorities from your own issue and PR history
+- Learns tone, labels and priorities from your own issue and PR/MR history
 - Enforces every custom rule you define (style, security, process)
-- Produces structured, copy-paste-ready output for GitHub while gracefully falling back when offline
+- Produces structured, copy-paste-ready output for GitHub or GitLab while gracefully falling back when offline
+- Supports both GitHub and GitLab (including self-hosted GitLab) via a unified client interface
 
 ## 🎬 Demo
 
@@ -45,7 +46,7 @@ Analyzes new issues and suggests accurate labels, priority, assignee and duplica
 Finds semantically similar past issues via targeted LLM prompts and conservative matching
 </td>
 <td>
-📋 <b>PR Reviewer</b><br>
+📋 <b>PR/MR Reviewer</b><br>
 Generates contextual reviews with line-specific comments, verdicts and security flags
 </td>
 </tr>
@@ -82,6 +83,12 @@ The `mantis` console script is automatically installed via the pyproject.toml en
 mantis triage --repo ajendras/mantis --issue 42
 ```
 
+For GitLab:
+
+```bash
+mantis triage --repo owner/repo --issue 42 --platform gitlab
+```
+
 Or via the Python API:
 
 ```python
@@ -89,6 +96,7 @@ from mantis import triage_issue, Config
 from mantis.models import Issue
 
 config = Config.load()
+config.platform = "gitlab"  # or "github"
 issue = {"title": "Segmentation fault on login", "body": "Crashes with SIGSEGV...", "number": 42}
 result = triage_issue(issue, config=config)
 print(result.labels, result.priority, result.duplicate_ids)
@@ -96,16 +104,16 @@ print(result.labels, result.priority, result.duplicate_ids)
 
 ## 🧰 Usage
 
-Run a full triage with model override:
+Run a full triage with model and platform override:
 
 ```bash
-mantis triage --repo ajendras/mantis --issue 123 --model llama3.1
+mantis triage --repo ajendras/mantis --issue 123 --model llama3.1 --platform gitlab
 ```
 
-Review a PR (fetches diff automatically):
+Review a PR/MR (fetches diff automatically):
 
 ```bash
-mantis review --repo ajendras/mantis --pr 57
+mantis review --repo ajendras/mantis --pr 57 --platform github
 ```
 
 Generate a digest for the last 14 days:
@@ -126,12 +134,14 @@ mantis init --rules "Never close issues without reproduction steps,Always label 
 from mantis import triage_issue, Config
 from mantis.models import Issue
 
-config = Config(model="llama3", rules=["Use conventional commit labels"])
+config = Config.load()
+config.platform = "gitlab"
+config.rules = ["Use conventional commit labels"]
 issue_dict = {
     "title": "Crash on startup with Python 3.12",
     "body": "Traceback shows... ",
     "number": 42,
-    "html_url": "https://github.com/ajendras/mantis/issues/42"
+    "html_url": "https://gitlab.com/owner/repo/-/issues/42"
 }
 
 result = triage_issue(issue_dict, config)
@@ -146,6 +156,7 @@ from pathlib import Path
 from mantis import Config, generate_digest
 
 config = Config.load(Path(".mantis/config.json"))
+config.platform = "github"
 config.rules.append("All new features must include a test plan")
 config.save()
 
@@ -161,6 +172,9 @@ print(report)
 | model             | llama3                   | Ollama model name (or any OpenAI-compatible local endpoint) |
 | temperature       | 0.3                      | Sampling temperature for the LLM (0.0–1.0) |
 | github_token      | None                     | GitHub PAT for private repos or higher rate limits |
+| gitlab_token      | None                     | GitLab PAT (falls back to github_token); required for private GitLab repos |
+| platform          | github                   | Version control platform: `github` or `gitlab` |
+| gitlab_url        | https://gitlab.com       | Base URL for GitLab (supports self-hosted instances) |
 | ollama_base_url   | http://localhost:11434   | Base URL of the Ollama (or compatible) server |
 | max_tokens        | 4096                     | Maximum tokens to request from the model |
 | rules             | []                       | List of project-specific rules the LLM must follow on every run |
@@ -178,18 +192,18 @@ flowchart TD
     Analyzer --> LLM[llm.py]
     Reviewer --> LLM
     Analyzer --> Duplicate[DuplicateDetector]
-    Analyzer --> GitHub[github.py]
-    Reviewer --> GitHub
+    Analyzer --> Client[github.py + gitlab.py]
+    Reviewer --> Client
     LLM --> Ollama[(Ollama)]
-    GitHub --> GitHubAPI[GitHub REST API]
-    Config[config.py] -->|rules + context| Analyzer
-    Config -->|rules + context| Reviewer
-    Config -->|rules + context| Prompts
+    Client --> GitHubAPI[GitHub/GitLab REST API]
+    Config[config.py] -->|rules + context + platform| Analyzer
+    Config -->|rules + context + platform| Reviewer
+    Config -->|rules + context + platform| Prompts
     Models[models.py] -->|validation| Analyzer
     Models -->|validation| Reviewer
 ```
 
-Mantis composes small, single-responsibility modules that the public API and CLI orchestrate. Every LLM call receives the same system context and project rules from `Config.get_system_context()`. `analyzer.py` and `review.py` handle domain logic while `llm.py` abstracts model access and JSON parsing with graceful offline fallbacks.
+Mantis composes small, single-responsibility modules that the public API and CLI orchestrate. Every LLM call receives the same system context and project rules from `Config.get_system_context()`. `analyzer.py` and `review.py` handle domain logic while `llm.py` abstracts model access and JSON parsing with graceful offline fallbacks. The `GitHubClient`/`GitLabClient` pair provides a compatible interface (normalization, same method names) so platform switching is transparent.
 
 ## 📁 Project structure
 
@@ -197,9 +211,10 @@ Mantis composes small, single-responsibility modules that the public API and CLI
 src/mantis/
 ├── __init__.py          # Public API: triage_issue(), review_pr(), generate_digest(), Config
 ├── cli.py               # Typer CLI with commands: init, triage, review, digest, config
-├── config.py            # Pydantic Settings, rule validation, system context
+├── config.py            # Pydantic Settings, rule validation, system context, platform
 ├── llm.py               # LLM wrapper with JSON mode, streaming and error handling
-├── github.py            # GitHubClient with get_issue(), get_pr_diff(), list_recent_issues()
+├── github.py            # GitHubClient (with MR aliases for compatibility)
+├── gitlab.py            # GitLabClient with identical interface + response normalization
 ├── analyzer.py          # IssueAnalyzer + DuplicateDetector using TRIAGE_PROMPT
 ├── review.py            # PRReviewer using REVIEW_PROMPT and structured Review output
 ├── prompts.py           # Template constants and format_* functions
@@ -222,13 +237,13 @@ examples/
 pytest -q
 ```
 
-Tests cover `IssueAnalyzer.analyze()`, `DuplicateDetector.find_duplicates()`, `PRReviewer.review()`, rule injection, fallback behavior, model validation and CLI output paths using the `mock_llm` and `mock_github_client` fixtures.
+Tests cover `IssueAnalyzer.analyze()`, `DuplicateDetector.find_duplicates()`, `PRReviewer.review()`, rule injection, fallback behavior, model validation and CLI output paths using the `mock_llm` and `mock_github_client` fixtures. GitLab path exercised via platform configuration in integration flows.
 
 ## 📍 Roadmap
 
 <!-- roadmap:start -->
 - [x] **v0.1.0** — first release: Smart Triage, Duplicate Detector, PR Reviewer, Reply Assistant
-- [ ] Add GitLab support alongside GitHub
+- [x] Add GitLab support alongside GitHub
 - [ ] Interactive approval mode before posting comments
 - [ ] Persist learned project conventions in a local vector store
 - [ ] Support for additional local backends (llama.cpp, MLX)

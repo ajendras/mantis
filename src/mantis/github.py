@@ -2,6 +2,8 @@
 
 Handles issue/PR retrieval, diff fetching, and recent activity listing
 with automatic rate-limit backoff and clear error messaging.
+
+Also provides MR aliases so the same interface works with GitLabClient.
 """
 
 from __future__ import annotations
@@ -19,6 +21,8 @@ class GitHubClient:
 
     Supports public and authenticated access, rate-limit handling,
     and returns data compatible with the Pydantic models in .models.
+    The get_merge_request/get_mr_diff methods are aliases so that
+    GitLabClient can be dropped in transparently.
     """
 
     BASE_URL = "https://api.github.com"
@@ -34,7 +38,7 @@ class GitHubClient:
         self.session.headers.update(
             {
                 "Accept": "application/vnd.github.v3+json",
-                "User-Agent": "mantis/0.1.0 (github.com/user/mantis)",
+                "User-Agent": "mantis/0.1.0 (github.com/ajendras/mantis)",
             }
         )
         if token:
@@ -176,3 +180,13 @@ class GitHubClient:
         response = self._request("GET", url, params=params)
         prs: list[dict[str, Any]] = response.json()
         return prs[:limit]
+
+    def get_merge_request(
+        self, owner: str, repo: str, number: int
+    ) -> dict[str, Any]:
+        """Alias for get_issue on GitHub since PRs are issues."""
+        return self.get_issue(owner, repo, number)
+
+    def get_mr_diff(self, owner: str, repo: str, number: int) -> str:
+        """Alias for get_pr_diff on GitHub."""
+        return self.get_pr_diff(owner, repo, number)

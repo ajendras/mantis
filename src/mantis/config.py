@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -35,6 +35,18 @@ class Config(BaseSettings):
     github_token: str | None = Field(
         default=None,
         description="GitHub PAT. Only needed for private repos or higher rate limits.",
+    )
+    platform: Literal["github", "gitlab"] = Field(
+        default="github",
+        description="Version control platform (github or gitlab)",
+    )
+    gitlab_token: str | None = Field(
+        default=None,
+        description="GitLab PAT. Falls back to github_token if not set.",
+    )
+    gitlab_url: str = Field(
+        default="https://gitlab.com",
+        description="Base URL of your GitLab instance (supports self-hosted)",
     )
     ollama_base_url: str = Field(
         default="http://localhost:11434",

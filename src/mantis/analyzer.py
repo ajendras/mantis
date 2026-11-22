@@ -96,7 +96,7 @@ Be conservative — prefer false negatives over false positives.
 
 
 class IssueAnalyzer:
-    """Orchestrates LLM-powered triage of a GitHub issue.
+    """Orchestrates LLM-powered triage of a GitHub or GitLab issue.
 
     Combines custom project rules, repository history, and structured
     JSON output to produce a TriageResult.

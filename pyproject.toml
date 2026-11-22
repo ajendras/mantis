@@ -5,14 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "mantis"
 version = "0.1.0"
-description = "Automates GitHub issue triage, PR reviews and maintainer tasks with local LLMs"
+description = "Automates GitHub and GitLab issue triage, PR/MR reviews and maintainer tasks with local LLMs"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.9"
 authors = [
     {name = "Mantis Contributors"},
 ]
-keywords = ["github", "ollama", "llm", "triage", "review", "automation"]
+keywords = ["github", "gitlab", "ollama", "llm", "triage", "review", "automation"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",

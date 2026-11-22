@@ -1,4 +1,4 @@
-"""Mantis — Local-first GitHub maintainer assistant powered by Ollama.
+"""Mantis — Local-first GitHub and GitLab maintainer assistant powered by Ollama.
 
 Provides a clean public API for triage, review, and digest generation.
 All heavy lifting is delegated to specialized modules while respecting
@@ -18,13 +18,13 @@ __all__ = ["triage_issue", "review_pr", "generate_digest", "Config"]
 
 
 def triage_issue(issue: dict[str, Any], config: Config | None = None) -> "TriageResult":
-    """Analyze a GitHub issue and return structured triage recommendations.
+    """Analyze a GitHub or GitLab issue and return structured triage recommendations.
 
     Uses the project's own history, custom rules, and local LLM to suggest
     labels, priority, assignee, and duplicate candidates.
 
     Args:
-        issue: GitHub issue payload (dict from API or raw JSON).
+        issue: GitHub/GitLab issue payload (dict from API or raw JSON).
         config: Optional configuration; loads from env/file if omitted.
 
     Returns:
@@ -39,7 +39,7 @@ def triage_issue(issue: dict[str, Any], config: Config | None = None) -> "Triage
     config.validate_rules()
 
     if not isinstance(issue, dict):
-        raise TypeError("issue must be a dictionary containing GitHub issue data")
+        raise TypeError("issue must be a dictionary containing VCS issue data")
 
     # Local imports keep the public API module lightweight and avoid
     # circular dependencies during the build-out of supporting modules.
@@ -51,11 +51,18 @@ def triage_issue(issue: dict[str, Any], config: Config | None = None) -> "Triage
     issue_model = Issue.model_validate(issue)
 
     llm = LLM(**config.get_llm_kwargs())
-    github_client = GitHubClient(token=config.github_token)
+
+    if config.platform == "github":
+        vcs_client = GitHubClient(token=config.github_token)
+    else:
+        from .gitlab import GitLabClient
+
+        token = config.gitlab_token or config.github_token
+        vcs_client = GitLabClient(token=token, base_url=config.gitlab_url)
 
     # Pull recent history for semantic context (duplicate detection + style learning)
     try:
-        history = github_client.list_recent_issues(
+        history = vcs_client.list_recent_issues(
             owner=issue_model.owner, repo=issue_model.repo, limit=20
         )
     except Exception:
@@ -69,13 +76,13 @@ def triage_issue(issue: dict[str, Any], config: Config | None = None) -> "Triage
 def review_pr(
     pr: dict[str, Any], diff: str, config: Config | None = None
 ) -> "Review":
-    """Perform a contextual code review of a pull request.
+    """Perform a contextual code review of a pull request or merge request.
 
     Generates line-specific comments, an overall verdict, security flags,
     and respects any project-specific rules defined in config.
 
     Args:
-        pr: GitHub PR payload (dict).
+        pr: GitHub/GitLab PR/MR payload (dict).
         diff: Unified diff text (patch) of the changes.
         config: Optional configuration; loads from env/file if omitted.
 
@@ -90,7 +97,7 @@ def review_pr(
     config.validate_rules()
 
     if not diff or not diff.strip():
-        raise ValueError("diff must be a non-empty string containing the PR patch")
+        raise ValueError("diff must be a non-empty string containing the PR/MR patch")
 
     from .llm import LLM
     from .models import PR, Review
@@ -111,7 +118,7 @@ def review_pr(
 def generate_digest(repo: str, days: int = 7, config: Config | None = None) -> str:
     """Generate a concise markdown weekly digest of repository activity.
 
-    Summarizes issues, PRs, decisions, and suggests next steps using
+    Summarizes issues, PRs/MRs, decisions, and suggests next steps using
     the project's own tone and rules.
 
     Args:
@@ -139,7 +146,14 @@ def generate_digest(repo: str, days: int = 7, config: Config | None = None) -> s
     from .prompts import DIGEST_PROMPT, format_digest_prompt
 
     llm = LLM(**config.get_llm_kwargs())
-    client = GitHubClient(token=config.github_token)
+
+    if config.platform == "github":
+        client = GitHubClient(token=config.github_token)
+    else:
+        from .gitlab import GitLabClient
+
+        token = config.gitlab_token or config.github_token
+        client = GitLabClient(token=token, base_url=config.gitlab_url)
 
     try:
         issues = client.list_recent_issues(owner, repo_name, limit=30)
