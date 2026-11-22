@@ -166,9 +166,12 @@ class IssueAnalyzer:
             if not llm_response.get("duplicate_ids"):
                 llm_response["duplicate_ids"] = duplicate_ids
 
-            # Normalise labels to always be a list
+            # Normalise labels to always be a list (split comma-separated strings)
             if isinstance(llm_response.get("labels"), str):
-                llm_response["labels"] = [llm_response["labels"]]
+                label_str: str = llm_response["labels"]
+                llm_response["labels"] = [
+                    lbl.strip() for lbl in label_str.split(",") if lbl.strip()
+                ]
 
             return TriageResult.model_validate(llm_response)
 
@@ -183,16 +186,20 @@ class IssueAnalyzer:
         body_lower = (issue.body or "").lower()
         text = title_lower + " " + body_lower
 
+        bug_keywords = ("bug", "error", "crash", "fail", "broken")
+        security_keywords = ("security", "vulnerab", "leak", "xss", "injection")
+        high_keywords = ("urgent", "crash", "critical", "production")
+
         labels: list[str] = ["bug"] if any(
-            kw in text for kw in ("bug", "error", "crash", "fail", "broken")
+            kw in text for kw in bug_keywords
         ) else ["question"]
 
-        if any(kw in text for kw in ("security", "vulnerab", "leak", "xss", "injection")):
+        if any(kw in text for kw in security_keywords):
             labels.append("security")
 
         priority = "high" if any(
-            kw in text for kw in ("urgent", "crash", "critical", "production")
-        ) else "medium"
+            kw in text for kw in high_keywords
+        ) or any(kw in text for kw in security_keywords) else "medium"
 
         return TriageResult(
             labels=labels,
