@@ -195,6 +195,9 @@ def review(
     platform: str = typer.Option(
         "github", "--platform", help="Platform: github or gitlab"
     ),
+    post: bool = typer.Option(
+        False, "--post", help="Interactively approve then post review as comment"
+    ),
 ) -> None:
     """Review a pull request or merge request and generate line-specific comments."""
     _print_header("Pull Request / MR Review")
@@ -266,7 +269,40 @@ def review(
             )
             console.print(f"   {comment.content.strip()}")
 
-    console.print("\n[dim]These comments can be posted directly to the PR/MR on GitHub or GitLab.[/dim]")
+    if post:
+        console.print("\n[bold #5c4033]Interactive Approval Mode[/bold #5c4033]")
+        if typer.confirm("Post this review as a comment on the PR/MR?", default=False):
+            body_parts = [
+                f"## 🪰 Mantis Review for #{pr}",
+                f"**Verdict**: `{result.verdict.upper()}`",
+                "",
+                result.summary.strip(),
+            ]
+            if result.security_flags:
+                body_parts.append("\n### Security Flags")
+                for flag in result.security_flags:
+                    body_parts.append(f"- {flag}")
+            if result.comments:
+                body_parts.append("\n### Line Comments")
+                for comment in result.comments:
+                    severity = getattr(comment, "severity", "medium").upper()
+                    body_parts.append(
+                        f"\n**Line {comment.line}** — **{severity}**\n\n{comment.content.strip()}\n"
+                    )
+            body = "\n".join(body_parts)
+            try:
+                client.post_pr_comment(owner, repo_name, pr, body)
+                console.print("[green]✅ Review posted successfully as comment![/green]")
+            except Exception as exc:
+                console.print(f"[red]Failed to post comment: {exc}[/red]")
+                raise typer.Exit(1) from exc
+        else:
+            console.print("[yellow]Review posting aborted by user.[/yellow]")
+    else:
+        console.print(
+            "\n[dim]Use --post to interactively approve and post this review as a "
+            "comment on the PR/MR.[/dim]"
+        )
 
 
 @app.command()

@@ -226,3 +226,31 @@ class GitLabClient:
         if isinstance(prs, list):
             return prs[:limit]
         return []
+
+    def post_pr_comment(
+        self, owner: str, repo: str, number: int, body: str
+    ) -> dict[str, Any]:
+        """Post a comment on a merge request.
+
+        Args:
+            owner: Repository owner (or group).
+            repo: Repository name.
+            number: MR IID.
+            body: Markdown body of the comment.
+
+        Returns:
+            Normalized comment payload.
+
+        Raises:
+            ValueError: On invalid parameters.
+            requests.HTTPError: On API errors.
+        """
+        if not owner or not repo or number < 1 or not body or not body.strip():
+            raise ValueError(
+                "owner, repo, number (>0) and non-empty body are required"
+            )
+
+        project = f"{owner}%2F{repo}"
+        url = f"{self.api_url}/projects/{project}/merge_requests/{number}/notes"
+        response = self._request("POST", url, json={"body": body})
+        return self._normalize(response.json())

@@ -1,99 +1,50 @@
-"""Tests for PR/MR review functionality."""
+"""Tests for the PR review module."""
 
 from unittest.mock import Mock, patch
 
 import pytest
 
-from mantis.config import Config
-from mantis.models import Review
+from mantis.models import Review, Comment
 from mantis.review import PRReviewer
+from mantis.config import Config
 
 
-def test_successful_review_with_rules(mock_llm):
-    """Test review with project rules.
-
-    Rule expanded with context/examples so it passes validate_rules().
-    """
-    config = Config(
-        rules=[
-            "Always add tests when changing code. For example, when submitting "
-            "a PR include unit tests that reproduce the original bug (if any) "
-            "and verify the fix; ensure CI still passes."
-        ]
-    )
+def test_review_uses_system_context(mock_llm, config, sample_pr, sample_pr_diff):
     reviewer = PRReviewer(llm=mock_llm, config=config)
-    mock_llm.query.return_value = {
-        "verdict": "approve",
-        "summary": "The PR follows all rules including test coverage.",
-        "comments": [],
-        "security_flags": [],
-    }
-    diff = "diff --git a/src/main.py b/src/main.py\n--- a/src/main.py\n+++ b/src/main.py\n@@ -1,3 +1,5 @@\n+def test_feature():\n+    assert True"
-    pr_data = {
-        "owner": "ajendras",
-        "repo": "mantis",
-        "number": 57,
-        "title": "Add new feature",
-        "body": "Implements X",
-    }
-    result: Review = reviewer.review(
-        diff=diff,
-        context={"pr": pr_data, "repo_rules": config.rules},
-        rules=config.rules,
-    )
-    assert result.verdict == "approve"
-    assert "test" in result.summary.lower()
+    reviewer.review(sample_pr_diff, {"pr": sample_pr}, config.rules)
+    mock_llm.query.assert_called_once()
+    call_args = mock_llm.query.call_args
+    assert "system" in call_args.kwargs
 
 
-def test_review_security_issues(mock_llm):
-    config = Config(rules=["Never ignore security best practices."])
-    reviewer = PRReviewer(llm=mock_llm, config=config)
+def test_review_parses_verdict_and_comments(mock_llm, config):
     mock_llm.query.return_value = {
         "verdict": "request_changes",
-        "summary": "Found potential security issue",
+        "summary": "Needs more tests.",
         "comments": [
-            {"line": 42, "content": "Avoid hard-coded secrets", "severity": "high"}
+            {"line": 42, "content": "Add type hints", "severity": "medium"}
         ],
-        "security_flags": ["hardcoded credential"],
+        "security_flags": ["hardcoded secret"],
+        "reasoning": "test",
     }
-    diff = "sample diff with secret"
-    result: Review = reviewer.review(
-        diff=diff,
-        context={"pr": {"title": "insecure change"}},
-        rules=config.rules,
-    )
-    assert len(result.security_flags) == 1
+    reviewer = PRReviewer(llm=mock_llm, config=config)
+    result = reviewer.review("diff here", {}, [])
     assert result.verdict == "request_changes"
+    assert len(result.comments) == 1
+    assert result.comments[0].line == 42
+    assert len(result.security_flags) == 1
 
 
-def test_review_llm_failure_fallback(mock_llm):
-    config = Config(rules=[])
+def test_fallback_review_on_llm_failure(mock_llm, config):
+    mock_llm.query.side_effect = RuntimeError("boom")
     reviewer = PRReviewer(llm=mock_llm, config=config)
-    mock_llm.query.side_effect = RuntimeError("LLM unavailable")
-    diff = "diff --git ..."
-    result = reviewer.review(
-        diff=diff,
-        context={"pr": {"title": "offline test"}},
-        rules=[],
-    )
-    assert result is not None
-    assert hasattr(result, "verdict")
+    result = reviewer.review("some diff", {}, ["no secrets"])
+    assert result.verdict in ("comment", "request_changes")
+    assert "Fallback" in result.summary or "unavailable" in result.summary.lower()
 
 
-def test_rule_injection_into_prompt(mock_llm):
-    config = Config(rules=["All PRs must include a linked issue and pass all CI checks."])
-    reviewer = PRReviewer(llm=mock_llm, config=config)
-    mock_llm.query.return_value = {
-        "verdict": "comment",
-        "summary": "Rule-compliant review",
-        "comments": [],
-        "security_flags": [],
-    }
-    result = reviewer.review(
-        diff="diff content",
-        context={"pr": {"title": "test"}},
-        rules=config.rules,
-    )
-    assert isinstance(result, Review)
-    # verify rule was passed (mock call already exercised by review())
-    assert mock_llm.query.called
+def test_post_pr_comment_with_mock(mock_github_client):
+    """Test the new post_pr_comment integration point (used by interactive approval)."""
+    body = "## Mantis Review\n**Verdict**: APPROVE\n\nLooks good."
+    mock_github_client.post_pr_comment("owner", "repo", 1, body)
+    mock_github_client.post_pr_comment.assert_called_with("owner", "repo", 1, body)

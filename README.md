@@ -47,7 +47,7 @@ Finds semantically similar past issues via targeted LLM prompts and conservative
 </td>
 <td>
 📋 <b>PR/MR Reviewer</b><br>
-Generates contextual reviews with line-specific comments, verdicts and security flags
+Generates contextual reviews with line-specific comments, verdicts and security flags; supports interactive approval before posting
 </td>
 </tr>
 <tr>
@@ -89,6 +89,12 @@ For GitLab:
 mantis triage --repo owner/repo --issue 42 --platform gitlab
 ```
 
+Review a PR with interactive approval before posting:
+
+```bash
+mantis review --repo ajendras/mantis --pr 57 --post
+```
+
 Or via the Python API:
 
 ```python
@@ -110,10 +116,10 @@ Run a full triage with model and platform override:
 mantis triage --repo ajendras/mantis --issue 123 --model llama3.1 --platform gitlab
 ```
 
-Review a PR/MR (fetches diff automatically):
+Review a PR/MR (fetches diff automatically) and optionally post after approval:
 
 ```bash
-mantis review --repo ajendras/mantis --pr 57 --platform github
+mantis review --repo ajendras/mantis --pr 57 --platform github --post
 ```
 
 Generate a digest for the last 14 days:
@@ -244,7 +250,7 @@ Tests cover `IssueAnalyzer.analyze()`, `DuplicateDetector.find_duplicates()`, `P
 <!-- roadmap:start -->
 - [x] **v0.1.0** — first release: Smart Triage, Duplicate Detector, PR Reviewer, Reply Assistant
 - [x] Add GitLab support alongside GitHub
-- [ ] Interactive approval mode before posting comments
+- [x] Interactive approval mode before posting comments
 - [ ] Persist learned project conventions in a local vector store
 - [ ] Support for additional local backends (llama.cpp, MLX)
 - [ ] Few-shot examples pulled from repo's past maintainer comments
