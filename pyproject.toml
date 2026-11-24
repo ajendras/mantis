@@ -7,7 +7,7 @@ name = "mantis"
 version = "0.1.0"
 description = "Automates GitHub and GitLab issue triage, PR/MR reviews and maintainer tasks with local LLMs"
 readme = "README.md"
-license = {text = "MIT"}
+license = "MIT"
 requires-python = ">=3.9"
 authors = [
     {name = "Mantis Contributors"},
