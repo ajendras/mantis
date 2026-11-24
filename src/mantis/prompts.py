@@ -1,205 +1,158 @@
-"""Prompt templates and formatting utilities for Mantis.
+"""Prompt templates and formatting functions for Mantis.
 
-Centralizes all LLM prompts to ensure consistency, proper injection of
-project rules and context, and robust handling of input types (dicts from
-API, Pydantic models, and unittest.mock.Mock used in tests).
+Central place for all LLM prompts to keep them consistent, rule-injecting
+and tuned for local models like Llama 3. The format_* functions build
+complete user prompts from structured inputs.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from .models import Issue, PR
+from .models import Issue
 
 
-def _get_field(obj: Any, key: str, default: Any = None) -> Any:
-    """Safely retrieve a field by key from either a dict or an object.
+def format_triage_prompt(
+    issue: Issue, history: list[Issue], rules: list[str]
+) -> str:
+    """Build a detailed triage prompt including issue, history and rules.
 
-    Handles Pydantic models, plain dicts from VCS APIs, and unittest.mock.Mock
-    used in tests without raising TypeError or AttributeError.
+    Requests structured JSON output for easy parsing.
     """
-    if isinstance(obj, dict):
-        return obj.get(key, default)
-    # For objects (models or Mocks), getattr works; Mocks return child mocks
-    # which we handle downstream by checking type
-    return getattr(obj, key, default)
+    history_snippets = []
+    for h in history:
+        if h.number == issue.number:
+            continue
+        body_snip = (h.body or "")[:120].replace("\n", " ")
+        history_snippets.append(f"#{h.number} - {h.title}: {body_snip}...")
 
+    history_block = "\n".join(history_snippets) if history_snippets else "(no history)"
+    rules_block = "\n".join(f"  - {rule}" for rule in rules) if rules else "  (no custom rules)"
 
-def _safe_preview(obj: Any, max_len: int = 120) -> str:
-    """Return a truncated, cleaned preview of an issue/PR body.
+    return f"""You are an expert maintainer triaging incoming issues.
 
-    Robust against Mock objects and missing fields.
-    """
-    body = _get_field(obj, "body") or _get_field(obj, "description", "")
-    if not isinstance(body, str):
-        body = ""
-    preview = body[:max_len].replace("\n", " ").strip()
-    return preview + "..." if len(body) > max_len else preview
+CURRENT ISSUE
+Title: {issue.title}
+Body:
+{issue.body or '(no description)'}
+URL: {getattr(issue, 'html_url', 'n/a')}
 
+RECENT HISTORY FOR CONTEXT:
+{history_block}
 
-TRIAGE_PROMPT = """Analyze this issue and provide triage recommendations.
+PROJECT RULES — YOU MUST FOLLOW THESE:
+{rules_block}
 
-Title: {title}
-Body: {body}
-
-Recent similar issues for context:
-{history}
-
-Project rules to follow:
-{rules_section}
-
-Respond with valid JSON only using this schema:
+Analyze and respond with **valid JSON only** using this schema:
 {{
-  "labels": ["label1", "label2"],
-  "priority": "high" | "medium" | "low",
+  "labels": ["bug", "enhancement"],
+  "priority": "high|medium|low",
   "assignee": "username or null",
-  "duplicate_ids": [42, 13],
-  "reasoning": "One sentence explaining your decision"
+  "duplicate_ids": [23, 45],
+  "reasoning": "one sentence explanation"
 }}
 
-Be conservative with duplicates. Use project conventions for labels."""
+Be concise. Only return the JSON.
+"""
 
-REVIEW_PROMPT = """Review the following pull request / merge request.
 
-PR Title: {pr_title}
-PR Description: {pr_body}
+def format_review_prompt(
+    diff: str,
+    rules: list[str],
+    context: dict[str, Any] | None = None,
+) -> str:
+    """Build a review prompt from the diff, rules and contextual PR data.
 
-Changes:
+    Accepts context to incorporate PR title, body and other metadata
+    for more informed, contextual reviews.
+    """
+    ctx = context or {}
+    pr = ctx.get("pr") or {}
+
+    # support both pydantic model and dict
+    if hasattr(pr, "title"):
+        title = pr.title
+        body = getattr(pr, "body", "") or "(no description)"
+    else:
+        title = pr.get("title", "Untitled PR")
+        body = pr.get("body") or pr.get("description", "(no description)")
+
+    rules_block = (
+        "\n".join(f"{i+1}. {r}" for i, r in enumerate(rules))
+        if rules
+        else "(none defined)"
+    )
+
+    return f"""Review the following pull/merge request for this project.
+
+PR/MR TITLE: {title}
+DESCRIPTION:
+{body}
+
+CHANGES:
 ```diff
 {diff}
 ```
 
-Project rules:
-{rules_section}
+You MUST follow these PROJECT RULES:
+{rules_block}
 
-Provide a structured review with verdict (approve, request_changes, comment),
-summary, line-specific comments if needed, and any security flags.
+Perform a thorough review. Look for bugs, security issues, style violations,
+missing tests, performance problems and adherence to the rules.
 
-Return valid JSON only:
+Return **valid JSON only** (no markdown, no extra text) with this structure:
+
 {{
-  "verdict": "approve|request_changes|comment",
-  "summary": "overall assessment",
+  "verdict": "approve" | "request_changes" | "comment",
+  "summary": "Overall assessment in 2-4 sentences",
   "comments": [
-    {{"line": 42, "content": "comment text", "severity": "medium"}}
+    {{
+      "line": <line_number_from_diff_or_0>,
+      "content": "Constructive comment or suggestion",
+      "severity": "high" | "medium" | "low"
+    }}
   ],
-  "security_flags": ["potential sql injection"]
+  "security_flags": ["short description of any security issues found or []"],
+  "reasoning": "Your step-by-step reasoning (not shown to user)"
 }}
 
-Follow the project rules strictly. Be constructive."""
-
-DIGEST_PROMPT = """Generate a concise weekly digest for the repository.
-
-Repository: {owner}/{repo}
-Period: last {days} days
-
-Recent issues:
-{issues_summary}
-
-Recent PRs/MRs:
-{prs_summary}
-
-Project rules: {rules_summary}
-
-Produce a markdown report with sections: Summary, Key Decisions, Open Items,
-Suggested Next Steps. Match the project's tone."""
-
-
-def format_triage_prompt(
-    issue: Issue, history: list[Any], rules: list[str]
-) -> str:
-    """Format the user prompt for issue triage.
-
-    Handles history items that may be dicts, Issue models or test Mocks.
-    """
-    if not isinstance(history, list):
-        history = []
-
-    history_lines: list[str] = []
-    issue_num = _get_field(issue, "number")
-    for h in history:
-        if _get_field(h, "number") == issue_num:
-            continue
-        preview = _safe_preview(h, 120)
-        title = _get_field(h, "title", "Untitled")
-        num = _get_field(h, "number", "??")
-        history_lines.append(f"#{num}: {title}\n   {preview}")
-
-    history_str = "\n\n".join(history_lines) or "No prior history available."
-
-    rules_section = "\n".join(f"- {rule}" for rule in rules) if rules else "(no rules defined)"
-
-    return TRIAGE_PROMPT.format(
-        title=issue.title,
-        body=(issue.body or "(no body provided)")[:500],
-        history=history_str,
-        rules_section=rules_section,
-    )
-
-
-def format_review_prompt(
-    pr: PR | dict[str, Any] | Any, diff: str, rules: list[str]
-) -> str:
-    """Format the user prompt for PR/MR review.
-
-    Accepts PR model, dict, context dict (for test compatibility) or Mock.
-    """
-    # Support test calls that may pass the full context dict
-    if isinstance(pr, dict) and "pr" in pr:
-        pr = pr["pr"]
-
-    pr_title = _get_field(pr, "title", "Untitled")
-    pr_body = _get_field(pr, "body") or _get_field(pr, "description", "(no description)")
-    if not isinstance(pr_body, str):
-        pr_body = "(no description)"
-
-    rules_section = "\n".join(f"- {r}" for r in rules) if rules else "(no rules)"
-
-    return REVIEW_PROMPT.format(
-        pr_title=pr_title,
-        pr_body=pr_body[:300],
-        diff=diff,
-        rules_section=rules_section,
-    )
+Use real line numbers from the diff when making comments (look for lines after @@).
+Be specific, actionable and kind. If everything looks good use "approve".
+"""
 
 
 def format_digest_prompt(
     owner: str,
     repo: str,
-    issues: list[Any],
-    prs: list[Any],
+    issues: list[dict[str, Any]],
+    prs: list[dict[str, Any]],
     days: int,
     rules: list[str],
 ) -> str:
-    """Format the prompt for generating a repository digest.
+    """Format the prompt used for weekly digest generation."""
+    rules_block = "\n".join(f"- {rule}" for rule in rules) if rules else "(no rules)"
+    issue_count = len(issues)
+    pr_count = len(prs)
 
-    Uses safe field access so it works with dicts from the VCS clients.
-    """
-    def summarize_items(items: list[Any], item_type: str) -> str:
-        lines = []
-        for item in items[:5]:  # limit context size for prompt
-            title = _get_field(item, "title", "Untitled")
-            num = _get_field(item, "number", "?")
-            state = _get_field(item, "state", "open")
-            lines.append(f"- #{num} {title} ({state})")
-        return "\n".join(lines) or f"No recent {item_type}."
+    return f"""Create a concise weekly digest for the {owner}/{repo} repository.
 
-    issues_summary = summarize_items(issues, "issues")
-    prs_summary = summarize_items(prs, "PRs/MRs")
+Period: last {days} days
+Issues: {issue_count}
+PRs/MRs: {pr_count}
 
-    rules_summary = ", ".join(rules) if rules else "none"
+Rules: 
+{rules_block}
 
-    return DIGEST_PROMPT.format(
-        owner=owner,
-        repo=repo,
-        days=days,
-        issues_summary=issues_summary,
-        prs_summary=prs_summary,
-        rules_summary=rules_summary,
-    )
+Provide a markdown summary of what happened, key decisions made, 
+any patterns in incoming work, and 2-3 suggested next steps for maintainers.
+
+Use the project's tone. Be brief, insightful and encouraging.
+Output only the markdown report.
+"""
 
 
-__all__ = [
-    "format_triage_prompt",
-    "format_review_prompt",
-    "format_digest_prompt",
-]
+# Legacy prompt constants (for backward compatibility / documentation)
+# The format_* functions above are the primary interface.
+TRIAGE_PROMPT = "See format_triage_prompt()"
+REVIEW_PROMPT = "See format_review_prompt()"
+DIGEST_PROMPT = "See format_digest_prompt()"

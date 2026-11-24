@@ -1,37 +1,38 @@
-"""PR review engine for Mantis.
+"""PR and MR review for Mantis.
 
-Generates contextual, line-aware code reviews with security analysis.
-Strictly respects project rules and produces structured output suitable
-for both human maintainers and downstream automation.
+Uses the local LLM to produce structured reviews that include an overall
+verdict, line-specific comments, security flags and respect all project rules.
+Falls back gracefully when the LLM is unavailable.
 """
 
 from __future__ import annotations
 
+import json
+import re
 from typing import Any
 from unittest.mock import Mock
 
 from .config import Config
 from .llm import LLM
-from .models import Comment, Review
+from .models import Review, Comment
 from .prompts import format_review_prompt
 
 
 class PRReviewer:
-    """Orchestrates LLM-powered PR reviews.
+    """Orchestrates LLM-powered review of PRs/MRs.
 
-    Produces a verdict, line-specific comments, security flags, and
-    a summary while respecting all project-specific rules.
+    Produces a Review model with verdict, summary, comments and security_flags.
     """
 
     def __init__(self, llm: LLM, config: Config) -> None:
-        """Initialize the reviewer.
+        """Initialize reviewer with LLM and config.
 
         Args:
-            llm: Configured LLM instance.
-            config: Mantis configuration (rules, model settings, etc).
+            llm: LLM instance to use for queries.
+            config: Project configuration including rules and system context.
 
         Raises:
-            TypeError: If llm or config have incorrect types.
+            TypeError: If arguments have wrong types.
         """
         if not isinstance(llm, (LLM, Mock)):
             raise TypeError("llm must be an LLM instance")
@@ -42,35 +43,28 @@ class PRReviewer:
         self.config = config
 
     def review(
-        self,
-        diff: str,
-        context: dict[str, Any] | None = None,
-        rules: list[str] | None = None,
+        self, diff: str, context: dict[str, Any], rules: list[str]
     ) -> Review:
-        """Perform a contextual code review of a pull request.
-
-        Generates line-specific comments, an overall verdict, security flags,
-        and respects any project-specific rules defined in config.
+        """Perform a review of the provided diff.
 
         Args:
-            diff: Unified diff text (patch) of the changes.
-            context: Additional PR metadata.
-            rules: Project rules (falls back to config.rules).
+            diff: Unified diff of the changes.
+            context: Contextual information (contains "pr" key with PR data).
+            rules: List of project rules to enforce.
 
         Returns:
-            Review object containing verdict, list of Comment objects, and security flags.
+            Review object with structured verdict and comments.
 
         Raises:
             ValueError: If diff is empty.
+            TypeError: If types are incorrect.
         """
-        if not isinstance(diff, str) or not diff.strip():
-            raise ValueError("diff must be a non-empty string containing the PR patch")
-
-        if context is None:
+        if not isinstance(diff, str):
+            raise TypeError("diff must be a string")
+        if not diff or not diff.strip():
+            raise ValueError("diff must be a non-empty string containing the PR/MR patch")
+        if not isinstance(context, dict):
             context = {}
-        if rules is None:
-            rules = self.config.rules
-
         if not isinstance(rules, list):
             rules = []
 
@@ -87,47 +81,93 @@ class PRReviewer:
                 stream=False,
             )
 
-            if not isinstance(llm_response, dict):
-                raise ValueError("LLM did not return a dictionary")
+            if isinstance(llm_response, str):
+                llm_response = self._parse_llm_json(llm_response)
 
-            # Ensure comments have severity defaults for validation
-            if isinstance(llm_response.get("comments"), list):
-                for c in llm_response["comments"]:
-                    if isinstance(c, dict) and "severity" not in c:
-                        c["severity"] = "medium"
+            if not isinstance(llm_response, dict):
+                raise ValueError("LLM response was not a dict")
+
+            # Normalise comments to be list of dicts with required fields
+            if "comments" not in llm_response or not isinstance(
+                llm_response["comments"], list
+            ):
+                llm_response["comments"] = []
+
+            for comment in llm_response["comments"]:
+                if isinstance(comment, dict):
+                    if "line" not in comment:
+                        comment["line"] = 0
+                    if "severity" not in comment:
+                        comment["severity"] = "medium"
+                    if "content" not in comment:
+                        comment["content"] = str(comment)
+
+            if "security_flags" not in llm_response:
+                llm_response["security_flags"] = []
+
+            if "summary" not in llm_response:
+                llm_response["summary"] = "No summary provided by LLM."
+
+            if "verdict" not in llm_response:
+                llm_response["verdict"] = "comment"
 
             return Review.model_validate(llm_response)
 
         except Exception as exc:
-            return self._fallback_review(diff, exc)
+            return self._fallback_review(diff, context, exc)
 
-    def _fallback_review(self, diff: str, error: Exception) -> Review:
-        """Return a safe default review when the LLM is unavailable."""
-        security_flags: list[str] = []
-        lower_diff = diff.lower()
-        if any(
-            kw in lower_diff
-            for kw in ("password", "secret=", "api_key", "hardcode", "private_key")
-        ):
-            security_flags.append("potential_hardcoded_credential")
+    def _parse_llm_json(self, text: str) -> dict[str, Any]:
+        """Extract and parse JSON from LLM text output (handles markdown fences)."""
+        # Remove possible markdown code blocks
+        json_match = re.search(
+            r"```(?:json)?\s*(.*?)```", text, re.DOTALL | re.IGNORECASE
+        )
+        if json_match:
+            text = json_match.group(1)
+
+        # Find json object
+        json_match = re.search(r"(\{.*\})", text, re.DOTALL)
+        if json_match:
+            text = json_match.group(1)
+
+        try:
+            return json.loads(text.strip())
+        except (json.JSONDecodeError, TypeError):
+            # Minimal fallback structure
+            return {
+                "verdict": "comment",
+                "summary": text.strip()[:500] or "Could not parse LLM output",
+                "comments": [],
+                "security_flags": [],
+                "reasoning": "JSON parsing failed",
+            }
+
+    def _fallback_review(
+        self, diff: str, context: dict[str, Any], error: Exception
+    ) -> Review:
+        """Return a safe fallback Review when LLM call fails.
+
+        Used by tests and in production when offline or model errors occur.
+        """
+        pr = context.get("pr", {})
+        title = getattr(pr, "title", pr.get("title", "PR")) if pr else "PR"
 
         return Review(
             verdict="comment",
             summary=(
-                "Automated review could not be completed because the local LLM "
-                "is unavailable. Please review the changes for correctness, "
-                "security, test coverage, and adherence to project conventions."
+                f"Automated review unavailable (LLM error: {error!s}).\n\n"
+                f"Please manually review {title}."
             ),
             comments=[
                 Comment(
                     line=0,
                     content=(
-                        "Could not generate detailed line-by-line review due to "
-                        "temporary LLM unavailability. Manual review is recommended."
+                        "The local LLM was unable to generate a review. "
+                        "This is the fallback response. Please review the diff manually."
                     ),
                     severity="medium",
                 )
             ],
-            security_flags=security_flags,
-            reasoning=f"Fallback review (LLM unavailable): {error!s}",
+            security_flags=[],
+            reasoning=f"Fallback review triggered by: {type(error).__name__}: {error!s}",
         )
