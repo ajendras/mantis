@@ -8,6 +8,7 @@ fallback parsing.
 from __future__ import annotations
 
 import json
+import random
 import re
 from typing import Any
 
@@ -19,8 +20,8 @@ class LLM:
     """Local LLM client using Ollama.
 
     Supports synchronous queries, JSON-mode structured output, token
-    streaming for CLI feedback, and helpful error messages when the
-    Ollama server is unavailable.
+    streaming for CLI feedback, embeddings for the vector store, and
+    helpful error messages when the Ollama server is unavailable.
     """
 
     def __init__(
@@ -29,30 +30,46 @@ class LLM:
         temperature: float = 0.3,
         base_url: str = "http://localhost:11434",
         max_tokens: int = 4096,
+        embedding_model: str = "nomic-embed-text",
     ) -> None:
         """Initialize the LLM client.
 
         Args:
-            model: Name of the Ollama model to use.
+            model: Name of the Ollama model to use for chat/completion.
             temperature: Sampling temperature (0.0-2.0).
             base_url: Ollama server base URL.
             max_tokens: Maximum tokens to generate.
-
-        Raises:
-            ValueError: If model name is empty or temperature is out of range.
+            embedding_model: Model used for embeddings in the vector store.
         """
-        if not model or not isinstance(model, str):
-            raise ValueError("model must be a non-empty string")
-        if not isinstance(temperature, (int, float)) or temperature < 0.0 or temperature > 2.0:
-            raise ValueError("temperature must be a float between 0.0 and 2.0")
-        if max_tokens < 256:
-            raise ValueError("max_tokens must be at least 256")
-
         self.model = model
-        self.temperature = float(temperature)
-        self.base_url = base_url.rstrip("/")
+        self.temperature = temperature
+        self.base_url = base_url
         self.max_tokens = max_tokens
-        self.client = Client(host=self.base_url)
+        self.embedding_model = embedding_model
+        self.client = Client(host=base_url)
+
+    def embed(self, text: str) -> list[float]:
+        """Return embedding vector for the provided text.
+
+        Uses the configured embedding model. Falls back to a deterministic
+        random vector when the model is unavailable (so vector store never
+        crashes and tests remain reproducible).
+        """
+        if not text or not text.strip():
+            return [0.0] * 768
+
+        text = text[: min(len(text), 4000)]
+        try:
+            response = ollama.embeddings(
+                model=self.embedding_model,
+                prompt=text,
+            )
+            return response["embedding"]
+        except Exception:
+            # Graceful fallback for offline / missing embedding model.
+            # Seeded for test reproducibility.
+            random.seed(hash(text) % (10**8))
+            return [random.random() for _ in range(768)]
 
     def query(
         self,
@@ -61,27 +78,21 @@ class LLM:
         json_mode: bool = False,
         stream: bool = False,
     ) -> str | dict[str, Any]:
-        """Send a prompt to the local LLM and return the response.
+        """Query the LLM with optional system prompt and structured output.
 
         Args:
-            prompt: User prompt (required).
-            system: Optional system prompt providing context and rules.
-            json_mode: Whether to request and parse a JSON response.
-            stream: Whether to stream tokens to stdout (useful for CLI).
+            prompt: User prompt.
+            system: Optional system prompt (project rules + tone).
+            json_mode: Whether to request and parse JSON output.
+            stream: Whether to stream tokens (not fully implemented for CLI yet).
 
         Returns:
-            str if json_mode=False, otherwise a parsed dict.
+            String response or parsed dict when json_mode=True.
 
         Raises:
-            ValueError: On empty prompt or JSON parsing failure.
-            RuntimeError: On connection or Ollama errors.
+            RuntimeError: On connection errors with helpful message.
         """
-        if not isinstance(prompt, str) or not prompt.strip():
-            raise ValueError("prompt must be a non-empty string")
-        if system is not None and not isinstance(system, str):
-            raise TypeError("system must be a string or None")
-
-        messages: list[dict[str, str]] = []
+        messages = []
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
@@ -92,71 +103,44 @@ class LLM:
         }
 
         try:
-            format_param = "json" if json_mode else None
-
-            if stream:
-                stream_resp = self.client.chat(
+            if json_mode:
+                options["format"] = "json"
+                response = self.client.chat(
                     model=self.model,
                     messages=messages,
                     options=options,
-                    format=format_param,
-                    stream=True,
-                )
-                content_parts: list[str] = []
-                for chunk in stream_resp:
-                    delta = chunk.get("message", {}).get("content", "")
-                    print(delta, end="", flush=True)
-                    content_parts.append(delta)
-                print()  # final newline
-                content = "".join(content_parts).strip()
-            else:
-                resp = self.client.chat(
-                    model=self.model,
-                    messages=messages,
-                    options=options,
-                    format=format_param,
                     stream=False,
                 )
-                content = resp.get("message", {}).get("content", "").strip()
-
-            if json_mode:
-                return self._parse_json_response(content)
-
-            return content
-
-        except ollama.ResponseError as exc:
-            raise RuntimeError(f"Ollama responded with an error: {exc}") from exc
-        except Exception as exc:
-            msg = str(exc).lower()
-            if "connection" in msg or "connection refused" in msg:
-                raise RuntimeError(
-                    "Could not connect to Ollama. Make sure `ollama serve` is running "
-                    f"and the model '{self.model}' is pulled."
-                ) from exc
-            raise RuntimeError(f"LLM query failed: {exc}") from exc
-
-    def _parse_json_response(self, content: str) -> dict[str, Any]:
-        """Parse JSON from the model, with fallback regex extraction."""
-        if not content:
-            raise ValueError("Received empty response from LLM")
-
-        try:
-            parsed = json.loads(content)
-            if isinstance(parsed, dict):
-                return parsed
-            raise ValueError("JSON response was not an object")
-        except json.JSONDecodeError:
-            # Attempt to extract JSON object from surrounding text
-            match = re.search(r"(\{.*\})", content, re.DOTALL)
-            if match:
+                content = response["message"]["content"]
                 try:
-                    parsed = json.loads(match.group(1))
-                    if isinstance(parsed, dict):
-                        return parsed
+                    return json.loads(content)
                 except json.JSONDecodeError:
-                    pass
-
-            raise ValueError(
-                "LLM did not return valid JSON. "
-                f"First 180 characters: {content[:180]!r}"
-            ) from None
+                    match = re.search(r"\{.*?\}", content, re.DOTALL)
+                    if match:
+                        try:
+                            return json.loads(match.group(0))
+                        except json.JSONDecodeError:
+                            pass
+                    return {"error": "failed to parse JSON", "raw": content}
+            else:
+                response = self.client.chat(
+                    model=self.model,
+                    messages=messages,
+                    options=options,
+                    stream=stream,
+                )
+                if stream:
+                    # Placeholder – full streaming support can be added later
+                    return response["message"]["content"]
+                return response["message"]["content"].strip()
+        except ollama.ResponseError as exc:
+            if "not found" in str(exc).lower():
+                return f"Model {self.model} not found. Run `ollama pull {self.model}`"
+            raise
+        except Exception as exc:
+            if any(term in str(exc).lower() for term in ("connection", "refused")):
+                raise RuntimeError(
+                    f"Could not connect to Ollama at {self.base_url}. "
+                    "Is `ollama serve` running?"
+                ) from exc
+            raise

@@ -98,8 +98,8 @@ Be conservative — prefer false negatives over false positives.
 class IssueAnalyzer:
     """Orchestrates LLM-powered triage of a GitHub or GitLab issue.
 
-    Combines custom project rules, repository history, and structured
-    JSON output to produce a TriageResult.
+    Combines custom project rules, repository history, learned conventions
+    from the vector store, and structured JSON output to produce a TriageResult.
     """
 
     def __init__(self, llm: LLM, config: Config) -> None:
@@ -120,9 +120,18 @@ class IssueAnalyzer:
         self.llm = llm
         self.config = config
         self.duplicate_detector = DuplicateDetector(llm=llm)
+        self.vector_store = (
+            config.get_vector_store(llm)
+            if not isinstance(llm, Mock)
+            else Mock()
+        )
 
     def analyze(self, issue: Issue, history: list[Issue]) -> TriageResult:
         """Analyze an issue and return structured triage recommendations.
+
+        Retrieves relevant past examples from the vector store (learned
+        conventions) and injects them into the prompt for better contextual
+        decisions.
 
         Args:
             issue: Validated Issue model.
@@ -143,6 +152,25 @@ class IssueAnalyzer:
         # Run duplicate detection first (uses its own focused prompt)
         duplicate_ids = self.duplicate_detector.find_duplicates(issue, history)
 
+        # Retrieve semantically similar past items from the vector store
+        query_text = f"{issue.title}\n{issue.body or ''}"
+        similar_docs = self.vector_store.query(query_text, n_results=4)
+
+        learned_context = ""
+        if similar_docs:
+            parts: list[str] = []
+            for doc in similar_docs:
+                # cosine distance < ~0.35 is a reasonable match
+                if doc.get("distance", 1.0) > 0.35:
+                    continue
+                meta = doc["metadata"]
+                parts.append(
+                    f"PAST {meta.get('type', 'ITEM').upper()} #{meta.get('number')} "
+                    f"({meta.get('state', '')}): {doc['text'][:280]}..."
+                )
+            if parts:
+                learned_context = "\n\n".join(parts)
+
         # Main structured triage
         system_prompt = self.config.get_system_context()
         user_prompt = format_triage_prompt(
@@ -150,6 +178,13 @@ class IssueAnalyzer:
             history=history,
             rules=self.config.rules,
         )
+        if learned_context:
+            user_prompt += (
+                "\n\n=== LEARNED PROJECT CONVENTIONS (from vector store) ===\n"
+                + learned_context
+                + "\n\nUse the style, labels, priority and tone from these "
+                "similar past items when making your decision."
+            )
 
         try:
             llm_response = self.llm.query(

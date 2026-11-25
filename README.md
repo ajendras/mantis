@@ -24,7 +24,7 @@
 Open-source maintainers drown in issues, PRs/MRs and repetitive questions while burning out. Existing AI tools leak private repo data to the cloud and lack project-specific context. Mantis runs 100% locally, learns your conventions from the repo itself, and handles the busywork so humans can focus on architecture and community.
 
 - Runs entirely with Ollama or any local OpenAI-compatible endpoint — nothing leaves your machine
-- Learns tone, labels and priorities from your own issue and PR/MR history
+- Learns tone, labels and priorities from your own issue and PR/MR history (persisted in a local vector store)
 - Enforces every custom rule you define (style, security, process)
 - Produces structured, copy-paste-ready output for GitHub or GitLab while gracefully falling back when offline
 - Supports both GitHub and GitLab (including self-hosted GitLab) via a unified client interface
@@ -64,11 +64,19 @@ Injects and strictly respects custom project rules on every LLM call
 Works offline with Ollama, LM Studio or any compatible endpoint; zero cloud leakage
 </td>
 </tr>
+<tr>
+<td>
+🧠 <b>Persistent Memory</b><br>
+Learns and persists project conventions, labels, tone and past decisions in a local vector store for relevant few-shot context on every run
+</td>
+<td></td>
+<td></td>
+</tr>
 </table>
 
 ## 📦 Installation
 
-Requires Python 3.9+ and a running Ollama instance with a model pulled (e.g. `ollama pull llama3`).
+Requires Python 3.9+ and a running Ollama instance with a model pulled (e.g. `ollama pull llama3` and `ollama pull nomic-embed-text` for the vector store).
 
 ```bash
 pip install mantis
@@ -80,6 +88,7 @@ The `mantis` console script is automatically installed via the pyproject.toml en
 ## ⚡ Quick start
 
 ```bash
+mantis learn --repo ajendras/mantis
 mantis triage --repo ajendras/mantis --issue 42
 ```
 
@@ -114,6 +123,12 @@ Run a full triage with model and platform override:
 
 ```bash
 mantis triage --repo ajendras/mantis --issue 123 --model llama3.1 --platform gitlab
+```
+
+Learn from your repository history (populates the local vector store):
+
+```bash
+mantis learn --repo ajendras/mantis --limit 80
 ```
 
 Review a PR/MR (fetches diff automatically) and optionally post after approval:
@@ -176,6 +191,7 @@ print(report)
 | Option            | Default                  | Description |
 |-------------------|--------------------------|-------------|
 | model             | llama3                   | Ollama model name (or any OpenAI-compatible local endpoint) |
+| embedding_model   | nomic-embed-text         | Ollama model used for vector embeddings (run `ollama pull nomic-embed-text`) |
 | temperature       | 0.3                      | Sampling temperature for the LLM (0.0–1.0) |
 | github_token      | None                     | GitHub PAT for private repos or higher rate limits |
 | gitlab_token      | None                     | GitLab PAT (falls back to github_token); required for private GitLab repos |
@@ -183,6 +199,7 @@ print(report)
 | gitlab_url        | https://gitlab.com       | Base URL for GitLab (supports self-hosted instances) |
 | ollama_base_url   | http://localhost:11434   | Base URL of the Ollama (or compatible) server |
 | max_tokens        | 4096                     | Maximum tokens to request from the model |
+| vector_store_path | .mantis/vectorstore      | Persistent directory for the local vector database of learned conventions |
 | rules             | []                       | List of project-specific rules the LLM must follow on every run |
 
 All options can be set via `MANTIS_*` environment variables, `.env`, or `.mantis/config.json`.
@@ -198,9 +215,11 @@ flowchart TD
     Analyzer --> LLM[llm.py]
     Reviewer --> LLM
     Analyzer --> Duplicate[DuplicateDetector]
+    Analyzer --> Vector[vectorstore.py]
     Analyzer --> Client[github.py + gitlab.py]
     Reviewer --> Client
     LLM --> Ollama[(Ollama)]
+    Vector --> Chroma[(ChromaDB)]
     Client --> GitHubAPI[GitHub/GitLab REST API]
     Config[config.py] -->|rules + context + platform| Analyzer
     Config -->|rules + context + platform| Reviewer
@@ -209,16 +228,17 @@ flowchart TD
     Models -->|validation| Reviewer
 ```
 
-Mantis composes small, single-responsibility modules that the public API and CLI orchestrate. Every LLM call receives the same system context and project rules from `Config.get_system_context()`. `analyzer.py` and `review.py` handle domain logic while `llm.py` abstracts model access and JSON parsing with graceful offline fallbacks. The `GitHubClient`/`GitLabClient` pair provides a compatible interface (normalization, same method names) so platform switching is transparent.
+Mantis composes small, single-responsibility modules that the public API and CLI orchestrate. Every LLM call receives the same system context and project rules from `Config.get_system_context()`. `analyzer.py` and `review.py` handle domain logic while `llm.py` abstracts model access and JSON parsing with graceful offline fallbacks. The `GitHubClient`/`GitLabClient` pair provides a compatible interface (normalization, same method names) so platform switching is transparent. `vectorstore.py` persists embeddings of past issues/PRs so relevant conventions are retrieved semantically on every triage/review.
 
 ## 📁 Project structure
 
 ```text
 src/mantis/
 ├── __init__.py          # Public API: triage_issue(), review_pr(), generate_digest(), Config
-├── cli.py               # Typer CLI with commands: init, triage, review, digest, config
+├── cli.py               # Typer CLI with commands: init, triage, review, digest, config, learn
 ├── config.py            # Pydantic Settings, rule validation, system context, platform
-├── llm.py               # LLM wrapper with JSON mode, streaming and error handling
+├── llm.py               # LLM wrapper with JSON mode, streaming, embeddings and error handling
+├── vectorstore.py       # Persistent ChromaDB wrapper for learned conventions and retrieval
 ├── github.py            # GitHubClient (with MR aliases for compatibility)
 ├── gitlab.py            # GitLabClient with identical interface + response normalization
 ├── analyzer.py          # IssueAnalyzer + DuplicateDetector using TRIAGE_PROMPT
@@ -229,7 +249,7 @@ src/mantis/
 
 tests/
 ├── conftest.py          # Fixtures: mock_llm, mock_github_client, sample_issue
-├── test_analyzer.py     # Tests analyze(), duplicate detection, fallback triage
+├── test_analyzer.py     # Tests analyze(), duplicate detection, fallback triage, vector store
 ├── test_review.py       # Tests PRReviewer.review(), verdict logic and rule adherence
 └── ...
 
@@ -243,7 +263,7 @@ examples/
 pytest -q
 ```
 
-Tests cover `IssueAnalyzer.analyze()`, `DuplicateDetector.find_duplicates()`, `PRReviewer.review()`, rule injection, fallback behavior, model validation and CLI output paths using the `mock_llm` and `mock_github_client` fixtures. GitLab path exercised via platform configuration in integration flows.
+Tests cover `IssueAnalyzer.analyze()`, `DuplicateDetector.find_duplicates()`, `PRReviewer.review()`, rule injection, fallback behavior, model validation and CLI output paths using the `mock_llm` and `mock_github_client` fixtures. GitLab path exercised via platform configuration in integration flows. Vector store tests mock embeddings and retrieval to verify learned conventions are injected into prompts.
 
 ## 📍 Roadmap
 
@@ -251,7 +271,7 @@ Tests cover `IssueAnalyzer.analyze()`, `DuplicateDetector.find_duplicates()`, `P
 - [x] **v0.1.0** — first release: Smart Triage, Duplicate Detector, PR Reviewer, Reply Assistant
 - [x] Add GitLab support alongside GitHub
 - [x] Interactive approval mode before posting comments
-- [ ] Persist learned project conventions in a local vector store
+- [x] Persist learned project conventions in a local vector store
 - [ ] Support for additional local backends (llama.cpp, MLX)
 - [ ] Few-shot examples pulled from repo's past maintainer comments
 - [ ] Discord and Slack notification hooks for high-priority items

@@ -26,6 +26,10 @@ class Config(BaseSettings):
         default="llama3",
         description="Ollama model name (or any OpenAI-compatible local endpoint)",
     )
+    embedding_model: str = Field(
+        default="nomic-embed-text",
+        description="Ollama model used for embeddings in the vector store",
+    )
     temperature: float = Field(
         default=0.3,
         ge=0.0,
@@ -60,6 +64,10 @@ class Config(BaseSettings):
     rules: list[str] = Field(
         default_factory=list,
         description="Project-specific rules the LLM must follow on every run",
+    )
+    vector_store_path: Path = Field(
+        default_factory=lambda: Path(".mantis") / "vectorstore",
+        description="Persistent storage path for the local vector database of learned conventions",
     )
     repo_path: Path = Field(
         default_factory=Path.cwd,
@@ -172,7 +180,22 @@ class Config(BaseSettings):
             "temperature": self.temperature,
             "base_url": self.ollama_base_url,
             "max_tokens": self.max_tokens,
+            "embedding_model": self.embedding_model,
         }
+
+    def get_vector_store(self, llm: "LLM | None" = None) -> "VectorStore":
+        """Return a VectorStore backed by this configuration.
+
+        Local import avoids circular dependencies at module load time.
+        """
+        if llm is None:
+            from .llm import LLM
+
+            llm = LLM(**self.get_llm_kwargs())
+
+        from .vectorstore import VectorStore
+
+        return VectorStore(path=self.vector_store_path, llm=llm)
 
     def save(self, path: Path | None = None) -> Path:
         """Persist configuration to a JSON file (useful after `mantis init`)."""

@@ -101,8 +101,76 @@ def init(
 
     console.print("\n[bold]Next steps:[/bold]")
     console.print("  mantis config --show          # review settings")
+    console.print("  mantis learn --repo owner/repo # populate vector store")
     console.print("  mantis triage --repo owner/repo --issue 42")
     console.print("  ollama pull llama3            # if not already present")
+    console.print("  ollama pull nomic-embed-text  # for vector embeddings")
+
+
+@app.command()
+def learn(
+    repo: str = typer.Option(
+        ..., "--repo", "-r", help="Repository in owner/repo format"
+    ),
+    limit: int = typer.Option(60, "--limit", "-l", min=10, help="Max items to index"),
+    model: str | None = typer.Option(
+        None, "--model", "-m", help="Override embedding model"
+    ),
+    platform: str = typer.Option(
+        "github", "--platform", help="Platform: github or gitlab"
+    ),
+) -> None:
+    """Index repository history into the local vector store.
+
+    This persists learned project conventions (labels, tone, decisions)
+    so future triage and reviews can retrieve semantically relevant
+    past examples automatically.
+    """
+    _print_header("Learn Project Conventions")
+
+    if "/" not in repo or len(repo.split("/")) != 2:
+        console.print("[red]Error: --repo must be in owner/repo format[/red]")
+        raise typer.Exit(1)
+
+    if platform not in ("github", "gitlab"):
+        console.print("[red]Error: --platform must be github or gitlab[/red]")
+        raise typer.Exit(1)
+
+    owner, repo_name = repo.split("/", 1)
+
+    config = Config.load()
+    if model:
+        config.embedding_model = model
+    if platform != "github":
+        config.platform = platform
+
+    client = _get_client(config)
+
+    console.print(f"Fetching up to {limit} recent items from {repo}...")
+    try:
+        issues = client.list_recent_issues(owner, repo_name, limit=limit)
+        prs = client.list_recent_prs(owner, repo_name, limit=limit // 2)
+        all_items = issues + prs
+
+        llm = LLM(**config.get_llm_kwargs())
+        vector_store = config.get_vector_store(llm)
+
+        indexed = vector_store.learn_from_items(all_items)
+        console.print(
+            f"[green]✓ Indexed {indexed} documents into the vector store.[/green]"
+        )
+        console.print(f"Storage: [bold]{config.vector_store_path}[/bold]")
+        console.print(
+            "\n[dim]Mantis will now retrieve relevant past examples on every "
+            "triage/review. Run again periodically to stay up-to-date.[/dim]"
+        )
+        console.print(
+            "[dim]Tip: ollama pull nomic-embed-text for high-quality semantic search[/dim]"
+        )
+    except Exception as exc:
+        console.print(f"[red]Learning failed: {exc}[/red]")
+        console.print("[dim]Make sure Ollama is running and the repo exists.[/dim]")
+        raise typer.Exit(1) from exc
 
 
 @app.command()
